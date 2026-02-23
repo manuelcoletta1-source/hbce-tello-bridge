@@ -1,6 +1,6 @@
 {
-  "gate": "DENIED",
+  "gate": "ALLOWED",
   "integrity": "HASH_OK",
   "mode": "HOLD",
-  "estop": true
+  "estop": false
 }
