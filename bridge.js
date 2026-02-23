@@ -2,6 +2,8 @@ import http from "http";
 import https from "https";
 
 const PORT = 17777;
+const EVENT_URL = "https://manuelcoletta1-source.github.io/hbce-tello-bridge/event.json";
+const POLL_MS = 5000;
 
 let state = {
   gate: "DENIED",
@@ -9,62 +11,94 @@ let state = {
   integrity: "UNKNOWN"
 };
 
-console.log("HBCE BRIDGE STARTING...");
+let diagnostics = {
+  last_fetch_iso: null,
+  last_status_code: null,
+  last_content_type: null,
+  last_error: null,
+  last_event: null
+};
 
-// ===== FETCH EVENT FROM GITHUB =====
+function nowISO(){ return new Date().toISOString(); }
+
+function failClosed(reason){
+  state.gate = "DENIED";
+  state.mode = "HOLD";
+  state.integrity = "FAIL";
+  diagnostics.last_error = reason;
+  console.log("[FAIL_CLOSED]", reason);
+}
+
 function fetchEvent(){
+  diagnostics.last_fetch_iso = nowISO();
+  diagnostics.last_error = null;
 
-  const url = "https://manuelcoletta1-source.github.io/hbce-tello-bridge/event.json";
+  https.get(EVENT_URL, (res) => {
+    diagnostics.last_status_code = res.statusCode || null;
+    diagnostics.last_content_type = String(res.headers["content-type"] || "");
 
-  https.get(url,res=>{
-    let data="";
+    let data = "";
+    res.on("data", (c) => data += c);
+    res.on("end", () => {
+      console.log("[FETCH]", diagnostics.last_fetch_iso, "status=", diagnostics.last_status_code, "ct=", diagnostics.last_content_type);
 
-    res.on("data",c=>data+=c);
-
-    res.on("end",()=>{
       try{
         const e = JSON.parse(data);
+        diagnostics.last_event = e;
 
-        console.log("REMOTE EVENT RECEIVED:");
-        console.log(e);
+        console.log("[REMOTE_EVENT]", e);
 
         if(e.integrity !== "HASH_OK"){
-          state.gate="DENIED";
-          state.mode="HOLD";
-          state.integrity="FAIL";
-          console.log("FAIL CLOSED");
+          failClosed("INTEGRITY_NOT_HASH_OK");
+          return;
+        }
+        if(e.gate !== "ALLOWED"){
+          failClosed("GATE_NOT_ALLOWED");
           return;
         }
 
-        state.gate="ALLOWED";
-        state.mode=e.mode || "HOLD";
-        state.integrity=e.integrity;
+        state.gate = "ALLOWED";
+        state.mode = e.mode || "HOLD";
+        state.integrity = "HASH_OK";
 
-        console.log("STATE UPDATED:",state);
-
+        console.log("[STATE_UPDATED]", state);
       }catch(err){
-        console.log("NO VALID EVENT");
+        // Often this happens when remote serves HTML; we expose a snippet to debug.
+        const snippet = String(data || "").slice(0, 140).replace(/\s+/g, " ").trim();
+        failClosed("JSON_PARSE_FAILED: " + String(err));
+        console.log("[BODY_SNIPPET]", snippet);
       }
     });
-
-  }).on("error",()=>{
-    console.log("FETCH ERROR");
+  }).on("error", (err) => {
+    failClosed("FETCH_ERROR: " + String(err));
   });
 }
 
-// controlla ogni 5 secondi
-setInterval(fetchEvent,5000);
+console.log("HBCE BRIDGE STARTING...");
+console.log("EVENT_URL:", EVENT_URL);
 
-// ===== STATUS SERVER =====
-const server = http.createServer((req,res)=>{
+// Fetch immediately (no waiting)
+fetchEvent();
 
+// Poll
+setInterval(fetchEvent, POLL_MS);
+
+// Local status server
+const server = http.createServer((req, res) => {
   if(req.url === "/status"){
-    res.writeHead(200, {"content-type":"application/json"});
+    res.writeHead(200, { "content-type":"application/json" });
     res.end(JSON.stringify({
-      ok:true,
-      system:"HBCE BRIDGE",
-      state
-    },null,2));
+      ok: true,
+      system: "HBCE BRIDGE",
+      state,
+      diagnostics
+    }, null, 2));
+    return;
+  }
+
+  if(req.url === "/event_url"){
+    res.writeHead(200, { "content-type":"text/plain" });
+    res.end(EVENT_URL);
     return;
   }
 
@@ -72,7 +106,7 @@ const server = http.createServer((req,res)=>{
   res.end("not found");
 });
 
-server.listen(PORT,()=>{
+server.listen(PORT, () => {
   console.log("HBCE BRIDGE ACTIVE");
   console.log("http://127.0.0.1:17777/status");
 });
