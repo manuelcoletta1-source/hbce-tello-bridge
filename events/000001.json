@@ -1,0 +1,9 @@
+{
+  "event_id": 1,
+  "gate": "ALLOWED",
+  "integrity": "HASH_OK",
+  "mode": "HOLD",
+  "estop": false,
+  "ts": "2026-02-23T00:00:00Z",
+  "source": "HBCE-GIT-LEDGER"
+}
