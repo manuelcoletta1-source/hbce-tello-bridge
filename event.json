@@ -1,7 +1,7 @@
 {
-  "event_id": 1,
+  "event_id": 2,
   "gate": "ALLOWED",
   "integrity": "HASH_OK",
-  "mode": "HOLD",
+  "mode": "EXPLORE_SLOW",
   "estop": false
 }
