@@ -1,7 +1,5 @@
-// HBCE BRIDGE — DRY RUN CORE
-// Local execution bridge (no drone required)
-
 import http from "http";
+import https from "https";
 
 const PORT = 17777;
 
@@ -13,6 +11,51 @@ let state = {
 
 console.log("HBCE BRIDGE STARTING...");
 
+// ===== FETCH EVENT FROM GITHUB =====
+function fetchEvent(){
+
+  const url = "https://manuelcoletta1-source.github.io/hbce-tello-bridge/event.json";
+
+  https.get(url,res=>{
+    let data="";
+
+    res.on("data",c=>data+=c);
+
+    res.on("end",()=>{
+      try{
+        const e = JSON.parse(data);
+
+        console.log("REMOTE EVENT RECEIVED:");
+        console.log(e);
+
+        if(e.integrity !== "HASH_OK"){
+          state.gate="DENIED";
+          state.mode="HOLD";
+          state.integrity="FAIL";
+          console.log("FAIL CLOSED");
+          return;
+        }
+
+        state.gate="ALLOWED";
+        state.mode=e.mode || "HOLD";
+        state.integrity=e.integrity;
+
+        console.log("STATE UPDATED:",state);
+
+      }catch(err){
+        console.log("NO VALID EVENT");
+      }
+    });
+
+  }).on("error",()=>{
+    console.log("FETCH ERROR");
+  });
+}
+
+// controlla ogni 5 secondi
+setInterval(fetchEvent,5000);
+
+// ===== STATUS SERVER =====
 const server = http.createServer((req,res)=>{
 
   if(req.url === "/status"){
@@ -22,36 +65,6 @@ const server = http.createServer((req,res)=>{
       system:"HBCE BRIDGE",
       state
     },null,2));
-    return;
-  }
-
-  if(req.method==="POST" && req.url==="/event"){
-    let body="";
-    req.on("data",c=>body+=c);
-
-    req.on("end",()=>{
-      console.log("EVENT RECEIVED:");
-      console.log(body);
-
-      try{
-        const e = JSON.parse(body);
-
-        if(e.integrity!=="HASH_OK"){
-          state.gate="DENIED";
-          state.mode="HOLD";
-          console.log("FAIL CLOSED: integrity");
-        }else{
-          state.gate="ALLOWED";
-          state.mode=e.mode||"HOLD";
-        }
-
-      }catch(err){
-        console.log("INVALID EVENT");
-      }
-
-      res.writeHead(200);
-      res.end("ok");
-    });
     return;
   }
 
