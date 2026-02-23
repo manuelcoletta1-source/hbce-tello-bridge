@@ -3,7 +3,14 @@ import https from "https";
 import fs from "fs";
 
 const PORT = 17777;
-const EVENT_URL = "https://manuelcoletta1-source.github.io/hbce-tello-bridge/event.json";
+
+// Append-only ledger pointers
+const HEAD_URL = "https://manuelcoletta1-source.github.io/hbce-tello-bridge/head.json";
+const BASE_URL = "https://manuelcoletta1-source.github.io/hbce-tello-bridge/";
+
+// Backward-compat fallback (optional)
+const LEGACY_EVENT_URL = "https://manuelcoletta1-source.github.io/hbce-tello-bridge/event.json";
+
 const POLL_MS = 5000;
 
 // Persisted local state (anti-replay survives restart)
@@ -20,6 +27,11 @@ let diagnostics = {
   last_status_code: null,
   last_content_type: null,
   last_error: null,
+
+  head_url: HEAD_URL,
+  last_head: null,
+  last_head_event_url: null,
+
   last_event: null,
   last_applied_event_id: 0
 };
@@ -34,7 +46,7 @@ function loadPersisted(){
       diagnostics.last_applied_event_id = obj.last_applied_event_id;
     }
   }catch{
-    // first run or unreadable file -> ok
+    // ok
   }
 }
 
@@ -46,7 +58,7 @@ function persist(){
       "utf8"
     );
   }catch{
-    // fail-closed does not depend on persistence; ignore
+    // ok
   }
 }
 
@@ -59,7 +71,6 @@ function setFailClosed(reason){
 }
 
 function parseEventId(e){
-  // Accept integer or numeric string
   const id = e?.event_id;
 
   if(typeof id === "number" && Number.isFinite(id)) return Math.trunc(id);
@@ -77,20 +88,17 @@ function parseEventId(e){
 function applyEvent(e){
   diagnostics.last_event = e;
 
-  // ---- E-STOP OVERRIDE (absolute) ----
-  // If estop is true, deny + hold regardless of any other fields.
+  // E-STOP override
   if(e && e.estop === true){
     setFailClosed("ESTOP_OVERRIDE");
     return;
   }
 
-  // ---- Event object sanity ----
   if(!e || typeof e !== "object"){
     setFailClosed("EVENT_INVALID");
     return;
   }
 
-  // ---- Anti-replay / monotonic event_id ----
   const eid = parseEventId(e);
   if(!Number.isFinite(eid)){
     setFailClosed("EVENT_ID_MISSING_OR_INVALID");
@@ -98,13 +106,11 @@ function applyEvent(e){
   }
 
   if(eid <= diagnostics.last_applied_event_id){
-    // Ignore old/replayed events (no state change)
     diagnostics.last_error = "EVENT_REPLAY_IGNORED";
     console.log("[REPLAY_IGNORED] event_id=", eid, "last_applied=", diagnostics.last_applied_event_id);
     return;
   }
 
-  // ---- Deterministic gating ----
   if(e.integrity !== "HASH_OK"){
     setFailClosed("INTEGRITY_NOT_HASH_OK");
     return;
@@ -115,7 +121,6 @@ function applyEvent(e){
     return;
   }
 
-  // Apply
   diagnostics.last_applied_event_id = eid;
   persist();
 
@@ -128,49 +133,104 @@ function applyEvent(e){
   console.log("[STATE_UPDATED]", state);
 }
 
-function fetchEvent(){
-  diagnostics.last_fetch_iso = nowISO();
-  diagnostics.last_error = null;
+function httpsGetText(url){
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      diagnostics.last_status_code = res.statusCode || null;
+      diagnostics.last_content_type = String(res.headers["content-type"] || "");
 
-  https.get(EVENT_URL, (res) => {
-    diagnostics.last_status_code = res.statusCode || null;
-    diagnostics.last_content_type = String(res.headers["content-type"] || "");
-
-    let data = "";
-    res.on("data", (c) => data += c);
-
-    res.on("end", () => {
-      console.log("[FETCH]", diagnostics.last_fetch_iso, "status=", diagnostics.last_status_code, "ct=", diagnostics.last_content_type);
-
-      try{
-        const e = JSON.parse(data);
-        console.log("[REMOTE_EVENT]", e);
-        applyEvent(e);
-      }catch(err){
-        const snippet = String(data || "").slice(0, 140).replace(/\s+/g, " ").trim();
-        setFailClosed("JSON_PARSE_FAILED: " + String(err));
-        console.log("[BODY_SNIPPET]", snippet);
-      }
-    });
-  }).on("error", (err) => {
-    setFailClosed("FETCH_ERROR: " + String(err));
+      let data = "";
+      res.on("data", (c) => data += c);
+      res.on("end", () => resolve(data));
+    }).on("error", (err) => reject(err));
   });
 }
 
-console.log("HBCE BRIDGE STARTING...");
-console.log("EVENT_URL:", EVENT_URL);
+async function fetchViaHead(){
+  diagnostics.last_fetch_iso = nowISO();
+  diagnostics.last_error = null;
 
-// Load persisted monotonic counter
-loadPersisted();
+  console.log("[FETCH_HEAD]", diagnostics.last_fetch_iso);
+
+  const headRaw = await httpsGetText(HEAD_URL);
+  let headObj;
+
+  try{
+    headObj = JSON.parse(headRaw);
+  }catch(err){
+    const snippet = String(headRaw || "").slice(0, 140).replace(/\s+/g, " ").trim();
+    setFailClosed("HEAD_JSON_PARSE_FAILED: " + String(err));
+    console.log("[HEAD_SNIPPET]", snippet);
+    return;
+  }
+
+  diagnostics.last_head = headObj;
+
+  const path = headObj?.head?.path;
+  if(typeof path !== "string" || !path.trim()){
+    setFailClosed("HEAD_PATH_MISSING");
+    return;
+  }
+
+  const eventUrl = BASE_URL + path.replace(/^\/+/, "");
+  diagnostics.last_head_event_url = eventUrl;
+
+  const eventRaw = await httpsGetText(eventUrl);
+
+  try{
+    const e = JSON.parse(eventRaw);
+    console.log("[REMOTE_EVENT]", e);
+    applyEvent(e);
+  }catch(err){
+    const snippet = String(eventRaw || "").slice(0, 140).replace(/\s+/g, " ").trim();
+    setFailClosed("EVENT_JSON_PARSE_FAILED: " + String(err));
+    console.log("[EVENT_SNIPPET]", snippet);
+  }
+}
+
+async function fetchLegacyEvent(){
+  diagnostics.last_fetch_iso = nowISO();
+  diagnostics.last_error = null;
+
+  console.log("[FETCH_LEGACY]", diagnostics.last_fetch_iso);
+
+  const raw = await httpsGetText(LEGACY_EVENT_URL);
+  try{
+    const e = JSON.parse(raw);
+    console.log("[REMOTE_EVENT_LEGACY]", e);
+    applyEvent(e);
+  }catch(err){
+    const snippet = String(raw || "").slice(0, 140).replace(/\s+/g, " ").trim();
+    setFailClosed("LEGACY_JSON_PARSE_FAILED: " + String(err));
+    console.log("[LEGACY_SNIPPET]", snippet);
+  }
+}
+
+async function tick(){
+  try{
+    await fetchViaHead();
+  }catch(err){
+    console.log("[HEAD_FETCH_ERROR]", String(err));
+    // fallback to legacy if head fetch fails
+    try{
+      await fetchLegacyEvent();
+    }catch(err2){
+      setFailClosed("FETCH_ERROR: " + String(err2));
+    }
+  }
+}
+
+console.log("HBCE BRIDGE STARTING...");
+console.log("HEAD_URL:", HEAD_URL);
 console.log("[ANTI_REPLAY] last_applied_event_id =", diagnostics.last_applied_event_id);
 
-// Fetch immediately (no waiting)
-fetchEvent();
+// immediate
+tick();
 
-// Poll
-setInterval(fetchEvent, POLL_MS);
+// poll
+setInterval(tick, POLL_MS);
 
-// Local status server
+// status server
 const server = http.createServer((req, res) => {
   if(req.url === "/status"){
     res.writeHead(200, { "content-type":"application/json" });
@@ -183,9 +243,9 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if(req.url === "/event_url"){
+  if(req.url === "/head_url"){
     res.writeHead(200, { "content-type":"text/plain" });
-    res.end(EVENT_URL);
+    res.end(HEAD_URL);
     return;
   }
 
