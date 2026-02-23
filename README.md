@@ -1,2 +1,14 @@
-# hbce-tello-bridge
-HBCE Tello Bridge — Local Execution Layer Local bridge that connects the HBCE control console to a DJI Tello via UDP SDK. Executes only verified mode commands under strict limits and fail-closed logic. 
+# HBCE Tello Bridge
+
+Local execution bridge connecting HBCE control console to DJI Tello via UDP SDK.
+
+Fail-closed architecture.  
+Mode-only control.  
+Local deterministic execution.
+
+## Run
+Node >=18 required
+Connect PC to Tello WiFi before running.
+
+Listens:
+http://127.0.0.1:17777/event
