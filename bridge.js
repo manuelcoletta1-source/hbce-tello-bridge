@@ -222,6 +222,8 @@ async function tick(){
 
 console.log("HBCE BRIDGE STARTING...");
 console.log("HEAD_URL:", HEAD_URL);
+
+loadPersisted();
 console.log("[ANTI_REPLAY] last_applied_event_id =", diagnostics.last_applied_event_id);
 
 // immediate
