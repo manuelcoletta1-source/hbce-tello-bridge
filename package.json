@@ -1,0 +1,10 @@
+{
+  "name": "hbce-tello-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "HBCE local execution bridge (dry-run first, audit-ready)",
+  "scripts": {
+    "start": "node bridge.js"
+  }
+}
