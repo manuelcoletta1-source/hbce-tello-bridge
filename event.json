@@ -1,0 +1,6 @@
+{
+  "gate": "ALLOWED",
+  "integrity": "HASH_OK",
+  "mode": "EXPLORE_SLOW",
+  "estop": false
+}
