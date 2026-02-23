@@ -21,12 +21,46 @@ let diagnostics = {
 
 function nowISO(){ return new Date().toISOString(); }
 
-function failClosed(reason){
+function setFailClosed(reason){
   state.gate = "DENIED";
   state.mode = "HOLD";
   state.integrity = "FAIL";
   diagnostics.last_error = reason;
   console.log("[FAIL_CLOSED]", reason);
+}
+
+function applyEvent(e){
+  diagnostics.last_event = e;
+
+  // ---- E-STOP OVERRIDE (absolute) ----
+  // If estop is true, deny + hold regardless of any other fields.
+  if(e && e.estop === true){
+    setFailClosed("ESTOP_OVERRIDE");
+    return;
+  }
+
+  // ---- Deterministic gating ----
+  if(!e || typeof e !== "object"){
+    setFailClosed("EVENT_INVALID");
+    return;
+  }
+
+  if(e.integrity !== "HASH_OK"){
+    setFailClosed("INTEGRITY_NOT_HASH_OK");
+    return;
+  }
+
+  if(e.gate !== "ALLOWED"){
+    setFailClosed("GATE_NOT_ALLOWED");
+    return;
+  }
+
+  state.gate = "ALLOWED";
+  state.mode = e.mode || "HOLD";
+  state.integrity = "HASH_OK";
+  diagnostics.last_error = null;
+
+  console.log("[STATE_UPDATED]", state);
 }
 
 function fetchEvent(){
@@ -39,38 +73,22 @@ function fetchEvent(){
 
     let data = "";
     res.on("data", (c) => data += c);
+
     res.on("end", () => {
       console.log("[FETCH]", diagnostics.last_fetch_iso, "status=", diagnostics.last_status_code, "ct=", diagnostics.last_content_type);
 
       try{
         const e = JSON.parse(data);
-        diagnostics.last_event = e;
-
         console.log("[REMOTE_EVENT]", e);
-
-        if(e.integrity !== "HASH_OK"){
-          failClosed("INTEGRITY_NOT_HASH_OK");
-          return;
-        }
-        if(e.gate !== "ALLOWED"){
-          failClosed("GATE_NOT_ALLOWED");
-          return;
-        }
-
-        state.gate = "ALLOWED";
-        state.mode = e.mode || "HOLD";
-        state.integrity = "HASH_OK";
-
-        console.log("[STATE_UPDATED]", state);
+        applyEvent(e);
       }catch(err){
-        // Often this happens when remote serves HTML; we expose a snippet to debug.
         const snippet = String(data || "").slice(0, 140).replace(/\s+/g, " ").trim();
-        failClosed("JSON_PARSE_FAILED: " + String(err));
+        setFailClosed("JSON_PARSE_FAILED: " + String(err));
         console.log("[BODY_SNIPPET]", snippet);
       }
     });
   }).on("error", (err) => {
-    failClosed("FETCH_ERROR: " + String(err));
+    setFailClosed("FETCH_ERROR: " + String(err));
   });
 }
 
