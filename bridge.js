@@ -1,9 +1,13 @@
 import http from "http";
 import https from "https";
+import fs from "fs";
 
 const PORT = 17777;
 const EVENT_URL = "https://manuelcoletta1-source.github.io/hbce-tello-bridge/event.json";
 const POLL_MS = 5000;
+
+// Persisted local state (anti-replay survives restart)
+const STATE_FILE = "./bridge_state.json";
 
 let state = {
   gate: "DENIED",
@@ -16,10 +20,35 @@ let diagnostics = {
   last_status_code: null,
   last_content_type: null,
   last_error: null,
-  last_event: null
+  last_event: null,
+  last_applied_event_id: 0
 };
 
 function nowISO(){ return new Date().toISOString(); }
+
+function loadPersisted(){
+  try{
+    const raw = fs.readFileSync(STATE_FILE, "utf8");
+    const obj = JSON.parse(raw);
+    if(obj && typeof obj.last_applied_event_id === "number"){
+      diagnostics.last_applied_event_id = obj.last_applied_event_id;
+    }
+  }catch{
+    // first run or unreadable file -> ok
+  }
+}
+
+function persist(){
+  try{
+    fs.writeFileSync(
+      STATE_FILE,
+      JSON.stringify({ last_applied_event_id: diagnostics.last_applied_event_id }, null, 2),
+      "utf8"
+    );
+  }catch{
+    // fail-closed does not depend on persistence; ignore
+  }
+}
 
 function setFailClosed(reason){
   state.gate = "DENIED";
@@ -27,6 +56,22 @@ function setFailClosed(reason){
   state.integrity = "FAIL";
   diagnostics.last_error = reason;
   console.log("[FAIL_CLOSED]", reason);
+}
+
+function parseEventId(e){
+  // Accept integer or numeric string
+  const id = e?.event_id;
+
+  if(typeof id === "number" && Number.isFinite(id)) return Math.trunc(id);
+
+  if(typeof id === "string"){
+    const s = id.trim();
+    if(!s) return NaN;
+    const n = Number(s);
+    if(Number.isFinite(n)) return Math.trunc(n);
+  }
+
+  return NaN;
 }
 
 function applyEvent(e){
@@ -39,12 +84,27 @@ function applyEvent(e){
     return;
   }
 
-  // ---- Deterministic gating ----
+  // ---- Event object sanity ----
   if(!e || typeof e !== "object"){
     setFailClosed("EVENT_INVALID");
     return;
   }
 
+  // ---- Anti-replay / monotonic event_id ----
+  const eid = parseEventId(e);
+  if(!Number.isFinite(eid)){
+    setFailClosed("EVENT_ID_MISSING_OR_INVALID");
+    return;
+  }
+
+  if(eid <= diagnostics.last_applied_event_id){
+    // Ignore old/replayed events (no state change)
+    diagnostics.last_error = "EVENT_REPLAY_IGNORED";
+    console.log("[REPLAY_IGNORED] event_id=", eid, "last_applied=", diagnostics.last_applied_event_id);
+    return;
+  }
+
+  // ---- Deterministic gating ----
   if(e.integrity !== "HASH_OK"){
     setFailClosed("INTEGRITY_NOT_HASH_OK");
     return;
@@ -55,11 +115,16 @@ function applyEvent(e){
     return;
   }
 
+  // Apply
+  diagnostics.last_applied_event_id = eid;
+  persist();
+
   state.gate = "ALLOWED";
   state.mode = e.mode || "HOLD";
   state.integrity = "HASH_OK";
   diagnostics.last_error = null;
 
+  console.log("[APPLIED] event_id=", eid);
   console.log("[STATE_UPDATED]", state);
 }
 
@@ -94,6 +159,10 @@ function fetchEvent(){
 
 console.log("HBCE BRIDGE STARTING...");
 console.log("EVENT_URL:", EVENT_URL);
+
+// Load persisted monotonic counter
+loadPersisted();
+console.log("[ANTI_REPLAY] last_applied_event_id =", diagnostics.last_applied_event_id);
 
 // Fetch immediately (no waiting)
 fetchEvent();
